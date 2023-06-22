@@ -1,16 +1,27 @@
 
-#[macro_use] extern crate rocket;
+#[macro_use] 
+ extern crate rocket;
+ extern crate log;
+ extern crate fern;
+ extern crate chrono;
+ extern crate config;
+ 
+ 
 use rocket::{get, post, routes, Rocket, Build};
-use rocket::serde::{Serialize, Deserialize, json::Json};
+use rocket::serde::{json::Json};
 use libloading::{Library, Symbol};
-
+use std::env;
 // Define the type signature for the process_input function
 type ProcessInputFn = extern "C" fn(*const std::os::raw::c_char) -> *mut std::os::raw::c_char;
 
 // Load the shared library and retrieve the process_input function
 fn load_library() -> Result<Library, &'static str> {
     unsafe{
-        let library = match { Library::new("./process_input.so") } {
+        
+        let out_dir = env::var("OUT_DIR").unwrap();
+        let path = format!("{}/mypi.so",out_dir);
+        info!("Attempting to load {}", path);
+        let library = match { Library::new(path) } {
             Ok(lib) => lib,
             Err(_) => return Err("Failed to load the shared library"),
         };
@@ -22,8 +33,8 @@ fn load_library() -> Result<Library, &'static str> {
 fn get_process_input_function(library: &Library) -> Result<Symbol<ProcessInputFn>, &'static str> {
     
     unsafe{
-
-        match { library.get(b"process_input\0") } {
+        info!("Attempting to load func");
+        match { library.get(b"processInput") } {
             Ok(function) => Ok(function),
             Err(_) => Err("Failed to retrieve the process_input function"),
         }
@@ -36,14 +47,14 @@ fn process_input(input: &str) -> String {
     let library = match load_library() {
         Ok(lib) => lib,
         Err(err) => return format!("Error: {}", err),
-    };
+    }; 
 
     // Retrieve the process_input function from the shared library
-    let process_input_fn = match get_process_input_function(&library) {
+    let  process_input_fn = match get_process_input_function(&library) {
         Ok(func) => func,
         Err(err) => return format!("Error: {}", err),
     };
-
+ 
     unsafe{
     // Convert the input string to a C-compatible format
     let c_string = std::ffi::CString::new(input).expect("CString::new failed");
@@ -77,19 +88,44 @@ fn world() -> &'static str {
 
 
 // Define a Rocket route that invokes your Rust function
-#[post("/process/<input>")]
-fn process_route(input: String) -> Json<String> {
-    let result = process_input(&input);
+#[post("/", format = "json", data = "<user_input>")]
+fn process_route(user_input: Json<String>) -> Json<String> {
+    trace!("Yo momma-----------");
+    let result = process_input(&user_input);
     Json(result)
 }
 
-// Start the Rocket web server
-fn rocket() -> Rocket<Build> {
-    rocket::build().mount("/", routes![hello])
-                   .mount("/hello", routes![world])
-                   .mount("/process", routes![process_route])
+
+
+fn setup_logger() -> Result<(), fern::InitError> {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "{}[{}][{}] {}",
+                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Debug)
+        .chain(std::io::stdout())
+        .chain(fern::log_file("output.log")?)
+        .apply()?;
+    Ok(())
 }
 
-fn main() {
-    rocket().launch();
+#[rocket::main]
+async fn main() -> Result<(), rocket::Error> {
+    let _ = setup_logger();
+    let rocket = Rocket::build().mount("/", routes![hello])
+                                .mount("/hello", routes![world])
+                                .mount("/process", routes![process_route]);
+
+    info!("Working!");  
+    
+    let result = rocket.launch().await;
+    assert!(result.is_ok());
+
+    Ok(())
 }
